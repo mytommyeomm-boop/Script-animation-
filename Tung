@@ -1,0 +1,815 @@
+--!strict
+-- Animation ID Scanner (LocalScript)
+-- Detects animations played on the local player's character.
+-- Shows unique Animation IDs, names, priority, loop status, and detection count.
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+
+local localPlayer = Players.LocalPlayer
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+
+-- ============================================================
+-- CONFIGURATION
+-- ============================================================
+local NEON_COLOR = Color3.fromRGB(0, 255, 200)
+local BG_COLOR = Color3.fromRGB(15, 15, 25)
+local PANEL_COLOR = Color3.fromRGB(25, 25, 40)
+local TEXT_COLOR = Color3.fromRGB(220, 220, 240)
+local SUBTEXT_COLOR = Color3.fromRGB(150, 150, 170)
+local DANGER_COLOR = Color3.fromRGB(255, 80, 100)
+local SUCCESS_COLOR = Color3.fromRGB(80, 255, 120)
+
+local FONT = Enum.Font.Gotham
+local FONT_BOLD = Enum.Font.GothamBold
+local CORNER_RADIUS = UDim.new(0, 10)
+
+-- ============================================================
+-- STATE
+-- ============================================================
+local isScanning = true
+local animationData = {} -- [animationId] = { id, name, priority, looped, count }
+local entryFrames = {}  -- [animationId] = frame
+local animatorConnection = nil
+local characterConnections = {}
+local currentAnimator = nil
+local currentHumanoid = nil
+
+-- ============================================================
+-- UI CREATION
+-- ============================================================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "AnimScannerGui"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = playerGui
+
+-- Main window frame
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainFrame"
+mainFrame.Size = UDim2.new(0, 360, 0, 480)
+mainFrame.Position = UDim2.new(0.5, -180, 0.5, -240)
+mainFrame.BackgroundColor3 = BG_COLOR
+mainFrame.BorderSizePixel = 0
+mainFrame.Active = true
+mainFrame.Parent = screenGui
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = CORNER_RADIUS
+mainCorner.Parent = mainFrame
+
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = NEON_COLOR
+mainStroke.Thickness = 2
+mainStroke.Transparency = 0.3
+mainStroke.Parent = mainFrame
+
+-- Title bar (drag handle)
+local titleBar = Instance.new("Frame")
+titleBar.Name = "TitleBar"
+titleBar.Size = UDim2.new(1, 0, 0, 42)
+titleBar.BackgroundColor3 = PANEL_COLOR
+titleBar.BorderSizePixel = 0
+titleBar.Parent = mainFrame
+
+local titleCorner = Instance.new("UICorner")
+titleCorner.CornerRadius = CORNER_RADIUS
+titleCorner.Parent = titleBar
+
+-- Fix bottom corners of title bar to be square
+local titleFix = Instance.new("Frame")
+titleFix.Size = UDim2.new(1, 0, 0, 12)
+titleFix.Position = UDim2.new(0, 0, 1, -12)
+titleFix.BackgroundColor3 = PANEL_COLOR
+titleFix.BorderSizePixel = 0
+titleFix.Parent = titleBar
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -90, 1, 0)
+titleLabel.Position = UDim2.new(0, 12, 0, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = "⚡ ANIM SCANNER"
+titleLabel.TextColor3 = NEON_COLOR
+titleLabel.Font = FONT_BOLD
+titleLabel.TextSize = 16
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Parent = titleBar
+
+-- Window control buttons
+local function createTitleButton(text, color, xOffset)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 28, 0, 28)
+    btn.Position = UDim2.new(1, xOffset, 0.5, -14)
+    btn.BackgroundColor3 = color
+    btn.Text = text
+    btn.TextColor3 = Color3.new(1, 1, 1)
+    btn.Font = FONT_BOLD
+    btn.TextSize = 14
+    btn.AutoButtonColor = false
+    btn.Parent = titleBar
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 6)
+    c.Parent = btn
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = color:Lerp(Color3.new(1,1,1), 0.4)
+    stroke.Thickness = 1
+    stroke.Transparency = 0.5
+    stroke.Parent = btn
+    return btn
+end
+
+local minimizeBtn = createTitleButton("—", Color3.fromRGB(60, 60, 80), -70)
+local closeBtn = createTitleButton("✕", DANGER_COLOR, -38)
+
+-- Content container (everything below title bar)
+local contentFrame = Instance.new("Frame")
+contentFrame.Name = "Content"
+contentFrame.Size = UDim2.new(1, 0, 1, -42)
+contentFrame.Position = UDim2.new(0, 0, 0, 42)
+contentFrame.BackgroundTransparency = 1
+contentFrame.Parent = mainFrame
+
+-- Top controls area (status, counters, search, buttons)
+local topPanel = Instance.new("Frame")
+topPanel.Size = UDim2.new(1, -16, 0, 100)
+topPanel.Position = UDim2.new(0, 8, 0, 8)
+topPanel.BackgroundTransparency = 1
+topPanel.Parent = contentFrame
+
+-- Status line
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, 0, 0, 20)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "🟢 SCANNING ACTIVE"
+statusLabel.TextColor3 = SUCCESS_COLOR
+statusLabel.Font = FONT_BOLD
+statusLabel.TextSize = 12
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Parent = topPanel
+
+-- Counter label
+local counterLabel = Instance.new("TextLabel")
+counterLabel.Size = UDim2.new(1, 0, 0, 20)
+counterLabel.Position = UDim2.new(0, 0, 0, 22)
+counterLabel.BackgroundTransparency = 1
+counterLabel.Text = "Unique IDs: 0"
+counterLabel.TextColor3 = TEXT_COLOR
+counterLabel.Font = FONT
+counterLabel.TextSize = 12
+counterLabel.TextXAlignment = Enum.TextXAlignment.Left
+counterLabel.Parent = topPanel
+
+-- Search box
+local searchBox = Instance.new("TextBox")
+searchBox.Size = UDim2.new(1, -80, 0, 30)
+searchBox.Position = UDim2.new(0, 0, 0, 48)
+searchBox.BackgroundColor3 = PANEL_COLOR
+searchBox.PlaceholderText = "Search IDs..."
+searchBox.Text = ""
+searchBox.TextColor3 = TEXT_COLOR
+searchBox.PlaceholderColor3 = SUBTEXT_COLOR
+searchBox.Font = FONT
+searchBox.TextSize = 13
+searchBox.ClearTextOnFocus = false
+searchBox.Parent = topPanel
+
+local searchCorner = Instance.new("UICorner")
+searchCorner.CornerRadius = UDim.new(0, 6)
+searchCorner.Parent = searchBox
+
+local searchStroke = Instance.new("UIStroke")
+searchStroke.Color = NEON_COLOR
+searchStroke.Thickness = 1
+searchStroke.Transparency = 0.6
+searchStroke.Parent = searchBox
+
+-- Copy All button
+local copyAllBtn = Instance.new("TextButton")
+copyAllBtn.Size = UDim2.new(0, 72, 0, 30)
+copyAllBtn.Position = UDim2.new(1, -72, 0, 48)
+copyAllBtn.BackgroundColor3 = NEON_COLOR
+copyAllBtn.Text = "Copy All"
+copyAllBtn.TextColor3 = Color3.new(0, 0, 0)
+copyAllBtn.Font = FONT_BOLD
+copyAllBtn.TextSize = 12
+copyAllBtn.AutoButtonColor = false
+copyAllBtn.Parent = topPanel
+
+local copyAllCorner = Instance.new("UICorner")
+copyAllCorner.CornerRadius = UDim.new(0, 6)
+copyAllCorner.Parent = copyAllBtn
+
+-- Action buttons row (Clear, Rescan)
+local actionRow = Instance.new("Frame")
+actionRow.Size = UDim2.new(1, 0, 0, 28)
+actionRow.Position = UDim2.new(0, 0, 0, 84)
+actionRow.BackgroundTransparency = 1
+actionRow.Parent = topPanel
+
+local function createSmallButton(text, color, xOffset)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 70, 0, 26)
+    btn.Position = UDim2.new(0, xOffset, 0, 0)
+    btn.BackgroundColor3 = color
+    btn.Text = text
+    btn.TextColor3 = Color3.new(1, 1, 1)
+    btn.Font = FONT_BOLD
+    btn.TextSize = 11
+    btn.AutoButtonColor = false
+    btn.Parent = actionRow
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 5)
+    c.Parent = btn
+    return btn
+end
+
+local clearBtn = createSmallButton("🗑 Clear", DANGER_COLOR, 0)
+local rescanBtn = createSmallButton("🔄 Rescan", Color3.fromRGB(60, 60, 90), 80)
+
+-- Scrolling list for animations
+local scrollFrame = Instance.new("ScrollingFrame")
+scrollFrame.Size = UDim2.new(1, -16, 1, -200)
+scrollFrame.Position = UDim2.new(0, 8, 0, 192)
+scrollFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 18)
+scrollFrame.BorderSizePixel = 0
+scrollFrame.ScrollBarThickness = 4
+scrollFrame.ScrollBarImageColor3 = NEON_COLOR
+scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+scrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+scrollFrame.Parent = contentFrame
+
+local scrollCorner = Instance.new("UICorner")
+scrollCorner.CornerRadius = UDim.new(0, 8)
+scrollCorner.Parent = scrollFrame
+
+local scrollStroke = Instance.new("UIStroke")
+scrollStroke.Color = NEON_COLOR
+scrollStroke.Thickness = 1
+scrollStroke.Transparency = 0.7
+scrollStroke.Parent = scrollFrame
+
+local listLayout = Instance.new("UIListLayout")
+listLayout.Padding = UDim.new(0, 4)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Parent = scrollFrame
+
+local listPadding = Instance.new("UIPadding")
+listPadding.PaddingTop = UDim.new(0, 6)
+listPadding.PaddingBottom = UDim.new(0, 6)
+listPadding.PaddingLeft = UDim.new(0, 6)
+listPadding.PaddingRight = UDim.new(0, 6)
+listPadding.Parent = scrollFrame
+
+-- Notification frame (initially hidden)
+local notificationFrame = Instance.new("Frame")
+notificationFrame.Size = UDim2.new(0, 200, 0, 36)
+notificationFrame.Position = UDim2.new(0.5, -100, 1, -50)
+notificationFrame.BackgroundColor3 = NEON_COLOR
+notificationFrame.BackgroundTransparency = 1
+notificationFrame.BorderSizePixel = 0
+notificationFrame.ZIndex = 10
+notificationFrame.Parent = mainFrame
+
+local notifCorner = Instance.new("UICorner")
+notifCorner.CornerRadius = UDim.new(0, 18)
+notifCorner.Parent = notificationFrame
+
+local notifLabel = Instance.new("TextLabel")
+notifLabel.Size = UDim2.new(1, -20, 1, 0)
+notifLabel.Position = UDim2.new(0, 10, 0, 0)
+notifLabel.BackgroundTransparency = 1
+notifLabel.Text = ""
+notifLabel.TextColor3 = Color3.new(0, 0, 0)
+notifLabel.Font = FONT_BOLD
+notifLabel.TextSize = 12
+notifLabel.TextTransparency = 1
+notifLabel.Parent = notificationFrame
+
+-- ============================================================
+-- NOTIFICATION SYSTEM
+-- ============================================================
+local notifTween = nil
+local function showNotification(text, color)
+    if notifTween then notifTween:Cancel() end
+    notificationFrame.BackgroundColor3 = color or NEON_COLOR
+    notifLabel.Text = text
+    notificationFrame.BackgroundTransparency = 0.15
+    notifLabel.TextTransparency = 0
+    notificationFrame.Position = UDim2.new(0.5, -100, 1, -50)
+
+    notifTween = TweenService:Create(notificationFrame, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Position = UDim2.new(0.5, -100, 1, -60),
+        BackgroundTransparency = 0.15,
+    })
+    notifTween:Play()
+
+    task.delay(1.5, function()
+        if notifTween then notifTween:Cancel() end
+        notifTween = TweenService:Create(notificationFrame, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            BackgroundTransparency = 1,
+            Position = UDim2.new(0.5, -100, 1, -40),
+        })
+        notifTween:Play()
+        notifTween.Completed:Wait()
+        notifLabel.TextTransparency = 1
+    end)
+end
+
+-- ============================================================
+-- CLIPBOARD HELPER
+-- ============================================================
+-- Roblox does not expose a direct clipboard API in standard scripts.
+-- We use a hidden TextBox that the user can focus and copy from (Ctrl+C / long-press).
+-- Some executors provide `setclipboard`, which we try via pcall.
+
+local function copyToClipboard(text: string, label: string)
+    -- Try setclipboard if available (executor environments)
+    local success = pcall(function()
+        if setclipboard then
+            setclipboard(text)
+        end
+    end)
+    if success and setclipboard then
+        showNotification("✅ Copied " .. label, SUCCESS_COLOR)
+        return
+    end
+
+    -- Fallback: create a temporary TextBox and select its content
+    local copyBox = Instance.new("TextBox")
+    copyBox.Size = UDim2.new(0, 200, 0, 30)
+    copyBox.Position = UDim2.new(0.5, -100, 0.5, -15)
+    copyBox.BackgroundColor3 = PANEL_COLOR
+    copyBox.TextColor3 = TEXT_COLOR
+    copyBox.Text = text
+    copyBox.Font = FONT
+    copyBox.TextSize = 12
+    copyBox.ClearTextOnFocus = false
+    copyBox.TextEditable = true
+    copyBox.ZIndex = 20
+    copyBox.Parent = screenGui
+
+    local boxCorner = Instance.new("UICorner")
+    boxCorner.CornerRadius = UDim.new(0, 6)
+    boxCorner.Parent = copyBox
+
+    copyBox:CaptureFocus()
+    copyBox.CursorPosition = 1
+    copyBox.SelectionStart = 1
+    -- Select all text
+    task.defer(function()
+        copyBox.CursorPosition = #text + 1
+        copyBox.SelectionStart = 1
+    end)
+
+    showNotification("📋 Select & copy: " .. label, NEON_COLOR)
+
+    -- Auto-destroy after 4 seconds
+    task.delay(4, function()
+        if copyBox and copyBox.Parent then
+            copyBox:Destroy()
+        end
+    end)
+end
+
+-- ============================================================
+-- UI HELPERS
+-- ============================================================
+local function updateCounter()
+    local count = 0
+    for _ in pairs(animationData) do count = count + 1 end
+    counterLabel.Text = "Unique IDs: " .. count
+end
+
+local function getPriorityName(priority: Enum.AnimationPriority): string
+    local map = {
+        [Enum.AnimationPriority.Core] = "Core",
+        [Enum.AnimationPriority.Idle] = "Idle",
+        [Enum.AnimationPriority.Movement] = "Movement",
+        [Enum.AnimationPriority.Action] = "Action",
+        [Enum.AnimationPriority.Action2] = "Action2",
+        [Enum.AnimationPriority.Action3] = "Action3",
+        [Enum.AnimationPriority.Action4] = "Action4",
+    }
+    return map[priority] or tostring(priority):gsub("Enum.AnimationPriority.", "")
+end
+
+local function extractId(animationId: string): string
+    -- Keep the full ID (e.g., "rbxassetid://123456")
+    return animationId
+end
+
+-- ============================================================
+-- UI: ADD / UPDATE ENTRY
+-- ============================================================
+local function createEntryFrame(data)
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 68)
+    frame.BackgroundColor3 = PANEL_COLOR
+    frame.BorderSizePixel = 0
+    frame.LayoutOrder = #entryFrames + 1
+    frame.Parent = scrollFrame
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = frame
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = NEON_COLOR
+    stroke.Thickness = 1
+    stroke.Transparency = 0.8
+    stroke.Parent = frame
+
+    -- Animation ID (large, neon)
+    local idLabel = Instance.new("TextLabel")
+    idLabel.Name = "IdLabel"
+    idLabel.Size = UDim2.new(1, -70, 0, 22)
+    idLabel.Position = UDim2.new(0, 10, 0, 6)
+    idLabel.BackgroundTransparency = 1
+    idLabel.Text = data.id
+    idLabel.TextColor3 = NEON_COLOR
+    idLabel.Font = FONT_BOLD
+    idLabel.TextSize = 13
+    idLabel.TextXAlignment = Enum.TextXAlignment.Left
+    idLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    idLabel.Parent = frame
+
+    -- Name
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Size = UDim2.new(1, -70, 0, 16)
+    nameLabel.Position = UDim2.new(0, 10, 0, 28)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Text = data.name ~= "" and data.name or "Unnamed Animation"
+    nameLabel.TextColor3 = TEXT_COLOR
+    nameLabel.Font = FONT
+    nameLabel.TextSize = 11
+    nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    nameLabel.Parent = frame
+
+    -- Info row: Priority | Looped | Count
+    local infoLabel = Instance.new("TextLabel")
+    infoLabel.Size = UDim2.new(1, -70, 0, 16)
+    infoLabel.Position = UDim2.new(0, 10, 0, 46)
+    infoLabel.BackgroundTransparency = 1
+    infoLabel.Text = string.format("⚡ %s  |  🔁 %s  |  👁 ×%d",
+        data.priority, data.looped and "Yes" or "No", data.count)
+    infoLabel.TextColor3 = SUBTEXT_COLOR
+    infoLabel.Font = FONT
+    infoLabel.TextSize = 10
+    infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+    infoLabel.Parent = frame
+
+    -- Copy button
+    local copyBtn = Instance.new("TextButton")
+    copyBtn.Size = UDim2.new(0, 56, 0, 26)
+    copyBtn.Position = UDim2.new(1, -64, 0, 8)
+    copyBtn.BackgroundColor3 = NEON_COLOR
+    copyBtn.Text = "Copy"
+    copyBtn.TextColor3 = Color3.new(0, 0, 0)
+    copyBtn.Font = FONT_BOLD
+    copyBtn.TextSize = 11
+    copyBtn.AutoButtonColor = false
+    copyBtn.Parent = frame
+
+    local copyCorner = Instance.new("UICorner")
+    copyCorner.CornerRadius = UDim.new(0, 5)
+    copyCorner.Parent = copyBtn
+
+    copyBtn.MouseButton1Click:Connect(function()
+        copyToClipboard(data.id, "ID")
+    end)
+
+    -- Store references for updates
+    frame:SetAttribute("AnimationId", data.id)
+    frame:SetAttribute("CopyBtn", copyBtn)
+
+    return frame
+end
+
+local function updateEntryFrame(frame, data)
+    local idLabel = frame:FindFirstChild("IdLabel")
+    if not idLabel then return end
+
+    -- Update ID (should not change, but safe)
+    idLabel.Text = data.id
+
+    -- Update info label (priority, loop, count)
+    local infoLabel = frame:FindFirstChildWhichIsA("TextLabel", true)
+    -- Find the info label specifically (the third TextLabel)
+    local labels = {}
+    for _, child in ipairs(frame:GetChildren()) do
+        if child:IsA("TextLabel") then
+            table.insert(labels, child)
+        end
+    end
+    if #labels >= 3 then
+        local info = labels[3]
+        info.Text = string.format("⚡ %s  |  🔁 %s  |  👁 ×%d",
+            data.priority, data.looped and "Yes" or "No", data.count)
+    end
+
+    -- Update name label (second TextLabel)
+    if #labels >= 2 then
+        labels[2].Text = data.name ~= "" and data.name or "Unnamed Animation"
+    end
+end
+
+-- ============================================================
+-- ANIMATION DATA HANDLING
+-- ============================================================
+local function addOrUpdateAnimation(animationTrack: AnimationTrack)
+    if not isScanning then return end
+
+    local animation = animationTrack.Animation
+    if not animation then return end
+
+    local rawId = animation.AnimationId
+    if rawId == "" then return end
+
+    local id = extractId(rawId)
+    local name = animation.Name or ""
+    local priority = getPriorityName(animationTrack.Priority)
+    local looped = animationTrack.Looped
+
+    if animationData[id] then
+        -- Update existing entry
+        local data = animationData[id]
+        data.count = data.count + 1
+        -- Update metadata in case it changed (e.g., priority or loop)
+        data.priority = priority
+        data.looped = looped
+        if name ~= "" then data.name = name end
+
+        local frame = entryFrames[id]
+        if frame then
+            updateEntryFrame(frame, data)
+        end
+    else
+        -- New unique ID
+        local data = {
+            id = id,
+            name = name,
+            priority = priority,
+            looped = looped,
+            count = 1,
+        }
+        animationData[id] = data
+
+        local frame = createEntryFrame(data)
+        entryFrames[id] = frame
+
+        updateCounter()
+        -- Smooth scale-in animation for new entry
+        frame.Size = UDim2.new(1, 0, 0, 0)
+        TweenService:Create(frame, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Size = UDim2.new(1, 0, 0, 68)
+        }):Play()
+    end
+
+    updateCounter()
+end
+
+-- ============================================================
+-- CHARACTER / ANIMATOR MANAGEMENT
+-- ============================================================
+local function disconnectCharacterConnections()
+    if animatorConnection then
+        animatorConnection:Disconnect()
+        animatorConnection = nil
+    end
+    for _, conn in ipairs(characterConnections) do
+        if conn then conn:Disconnect() end
+    end
+    characterConnections = {}
+    currentAnimator = nil
+    currentHumanoid = nil
+end
+
+local function setupCharacter(character: Model)
+    disconnectCharacterConnections()
+
+    local humanoid = character:WaitForChild("Humanoid", 5)
+    if not humanoid then return end
+    currentHumanoid = humanoid
+
+    local animator = humanoid:WaitForChild("Animator", 5)
+    if not animator then
+        -- Sometimes Animator is added later
+        animator = humanoid:FindFirstChildOfClass("Animator")
+    end
+    if not animator then
+        animator = Instance.new("Animator")
+        animator.Parent = humanoid
+    end
+    currentAnimator = animator
+
+    -- Connect AnimationPlayed for real-time detection
+    animatorConnection = animator.AnimationPlayed:Connect(function(track)
+        addOrUpdateAnimation(track)
+    end)
+
+    -- Scan currently playing animations (catch animations that started before connection)
+    local playing = animator:GetPlayingAnimationTracks()
+    for _, track in ipairs(playing) do
+        addOrUpdateAnimation(track)
+    end
+end
+
+-- ============================================================
+-- RESPAWN HANDLING
+-- ============================================================
+local function onCharacterAdded(character: Model)
+    setupCharacter(character)
+end
+
+localPlayer.CharacterAdded:Connect(onCharacterAdded)
+if localPlayer.Character then
+    setupCharacter(localPlayer.Character)
+end
+
+localPlayer.CharacterRemoving:Connect(function()
+    disconnectCharacterConnections()
+end)
+
+-- ============================================================
+-- UI: SEARCH FILTER
+-- ============================================================
+searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+    local query = searchBox.Text:lower()
+    for id, frame in pairs(entryFrames) do
+        if frame and frame.Parent then
+            local data = animationData[id]
+            if data then
+                local matches = query == "" 
+                    or id:lower():find(query, 1, true) ~= nil
+                    or data.name:lower():find(query, 1, true) ~= nil
+                frame.Visible = matches
+            end
+        end
+    end
+end)
+
+-- ============================================================
+-- UI: CLEAR LIST
+-- ============================================================
+clearBtn.MouseButton1Click:Connect(function()
+    -- Clear data
+    animationData = {}
+    for _, frame in pairs(entryFrames) do
+        if frame and frame.Parent then
+            frame:Destroy()
+        end
+    end
+    entryFrames = {}
+    updateCounter()
+    showNotification("🗑 List cleared", DANGER_COLOR)
+end)
+
+-- ============================================================
+-- UI: RESCAN
+-- ============================================================
+rescanBtn.MouseButton1Click:Connect(function()
+    if not currentAnimator then
+        showNotification("⚠️ No Animator found", DANGER_COLOR)
+        return
+    end
+
+    -- Clear existing data
+    animationData = {}
+    for _, frame in pairs(entryFrames) do
+        if frame and frame.Parent then
+            frame:Destroy()
+        end
+    end
+    entryFrames = {}
+    updateCounter()
+
+    -- Rescan currently playing
+    local playing = currentAnimator:GetPlayingAnimationTracks()
+    for _, track in ipairs(playing) do
+        addOrUpdateAnimation(track)
+    end
+
+    showNotification("🔄 Rescanned playing animations", NEON_COLOR)
+end)
+
+-- ============================================================
+-- UI: COPY ALL
+-- ============================================================
+copyAllBtn.MouseButton1Click:Connect(function()
+    local ids = {}
+    for id, _ in pairs(animationData) do
+        table.insert(ids, id)
+    end
+    if #ids == 0 then
+        showNotification("⚠️ No IDs to copy", DANGER_COLOR)
+        return
+    end
+    table.sort(ids)
+    local text = table.concat(ids, "\n")
+    copyToClipboard(text, "All IDs")
+end)
+
+-- ============================================================
+-- UI: MINIMIZE / RESTORE
+-- ============================================================
+local isMinimized = false
+local originalSize = mainFrame.Size
+local originalContentVisible = true
+
+local function setMinimized(minimized: boolean)
+    isMinimized = minimized
+    if minimized then
+        originalSize = mainFrame.Size
+        originalContentVisible = contentFrame.Visible
+        TweenService:Create(mainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Size = UDim2.new(0, 360, 0, 42)
+        }):Play()
+        contentFrame.Visible = false
+        minimizeBtn.Text = "□"
+    else
+        TweenService:Create(mainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Size = originalSize
+        }):Play()
+        contentFrame.Visible = originalContentVisible
+        minimizeBtn.Text = "—"
+    end
+end
+
+minimizeBtn.MouseButton1Click:Connect(function()
+    setMinimized(not isMinimized)
+end)
+
+-- ============================================================
+-- UI: CLOSE
+-- ============================================================
+closeBtn.MouseButton1Click:Connect(function()
+    isScanning = false
+    disconnectCharacterConnections()
+    screenGui:Destroy()
+end)
+
+-- ============================================================
+-- UI: DRAGGING (works on PC & mobile)
+-- ============================================================
+local dragging = false
+local dragStart = nil
+local startPos = nil
+
+titleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = mainFrame.Position
+
+        local inputChangedConn
+        inputChangedConn = input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+                if inputChangedConn then
+                    inputChangedConn:Disconnect()
+                    inputChangedConn = nil
+                end
+            end
+        end)
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if not dragging then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+        local delta = input.Position - dragStart
+        local newX = startPos.X.Offset + delta.X
+        local newY = startPos.Y.Offset + delta.Y
+
+        -- Clamp to screen bounds
+        local viewport = workspace.CurrentCamera.ViewportSize
+        local frameSize = mainFrame.AbsoluteSize
+        newX = math.clamp(newX, 0, viewport.X - frameSize.X)
+        newY = math.clamp(newY, 0, viewport.Y - frameSize.Y)
+
+        mainFrame.Position = UDim2.new(startPos.X.Scale, newX, startPos.Y.Scale, newY)
+    end
+end)
+
+-- ============================================================
+-- INITIAL COUNTER
+-- ============================================================
+updateCounter()
+
+-- ============================================================
+-- CLEANUP ON GUI DESTRUCTION
+-- ============================================================
+screenGui.AncestryChanged:Connect(function()
+    if not screenGui.Parent then
+        isScanning = false
+        disconnectCharacterConnections()
+    end
+end)
+
+print("[AnimScanner] Loaded successfully.")
